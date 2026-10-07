@@ -1,39 +1,43 @@
 name: Upstream Sync (am-cf-tunnel-sub)
 
+permissions:
+  contents: write
+
 on:
   schedule:
-    # 每 7 天同步一次（每月 1、8、15、22、29 日 UTC 0 点）
-    - cron: '0 0 */7 * *'
-  workflow_dispatch: # 支持手动触发
-
-env:
-  # 强制 Action 在 Node.js 24 环境下运行，消除弃用警告
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-permissions:
-  contents: write # 允许工作流推送更改到你的仓库
+    # 每 7 天左右同步一次（每月 1、8、15、22、29 日 UTC 0 点）
+    - cron: "0 0 */7 * *"
+  workflow_dispatch:
 
 jobs:
   sync_latest_from_upstream:
-    runs-on: ubuntu-24.04 # 锁定系统版本，避免未来自动迁移的风险
-    name: Sync latest commits from upstream repo
-    if: ${{ github.event.repository.fork }} # 仅在 fork 仓库中运行
+    name: Sync latest commits from amclubs/am-cf-tunnel-sub
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+
     steps:
       - name: Checkout target repo
-        uses: actions/checkout@v5 # 升级到 v5，正式支持 Node.js 24
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
 
       - name: Sync upstream changes
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-        with:
-          # 上游仓库地址，此处已根据你的要求修改
-          upstream_sync_repo: 'amclubs/am-cf-tunnel-sub'
+        run: |
+          git config user.name "GH Action - Upstream Sync"
+          git config user.email "action@github.com"
 
-          # 上游仓库的分支，通常为 main，如有不同请修改
-          upstream_sync_branch: 'main'
+          git remote add upstream https://github.com/amclubs/am-cf-tunnel-sub.git
+          git fetch upstream main
 
-          # 你自己的 fork 仓库要同步的分支，请根据实际情况修改
-          target_sync_branch: 'main'
-
-          # GitHub 自动提供，无需修改
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          if git diff --quiet HEAD upstream/main; then
+            git reset --hard upstream/main
+            git push --force-with-lease origin main
+          else
+            if ! git pull --no-rebase upstream main; then
+              echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
+              echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
+              exit 1
+            fi
+            git push origin main
+          fi
