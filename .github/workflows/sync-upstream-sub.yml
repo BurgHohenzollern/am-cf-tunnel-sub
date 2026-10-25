@@ -5,9 +5,14 @@ permissions:
 
 on:
   schedule:
-    # 每 7 天左右同步一次（每月 1、8、15、22、29 日 UTC 0 点）
-    - cron: "0 0 */7 * *"
+    # 每 7 天左右同步一次（每月 1、8、15、22、29 日 UTC 3 点 33 分）
+    - cron: "33 3 */7 * *"
   workflow_dispatch:
+
+# 防止定时触发和手动触发同时运行
+concurrency:
+  group: sync-upstream-am-cf-tunnel-sub
+  cancel-in-progress: false
 
 jobs:
   sync_latest_from_upstream:
@@ -17,27 +22,59 @@ jobs:
 
     steps:
       - name: Checkout target repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
 
       - name: Sync upstream changes
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "GH Action - Upstream Sync"
           git config user.email "action@github.com"
 
-          git remote add upstream https://github.com/amclubs/am-cf-tunnel-sub.git
-          git fetch upstream main
-
-          if git diff --quiet HEAD upstream/main; then
-            git reset --hard upstream/main
-            git push --force-with-lease origin main
+          # 已存在则更新 URL，避免重复 add 报错
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/amclubs/am-cf-tunnel-sub.git
           else
-            if ! git pull --no-rebase upstream main; then
-              echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
-              echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
-              exit 1
-            fi
-            git push origin main
+            git remote add upstream https://github.com/amclubs/am-cf-tunnel-sub.git
           fi
+
+          # 显式更新远程跟踪引用
+          git fetch upstream main:refs/remotes/upstream/main
+
+          LOCAL=$(git rev-parse HEAD)
+          REMOTE=$(git rev-parse upstream/main)
+
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "已是最新，无需同步"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor HEAD upstream/main; then
+            # 本地无分叉提交，直接快进
+            echo "本地无分叉提交，快进合并..."
+            git merge --ff-only upstream/main
+          else
+            # 本地有分叉提交（如改过 cron、新增文件、保活提交）
+            # 冲突时优先保留本地，其余上游变更照常合入
+            echo "本地存在分叉提交，执行合并（冲突优先保留本地）..."
+            if ! git merge upstream/main -X ours --no-edit \
+              -m "chore: merge upstream changes [skip ci]"; then
+              echo "::warning::自动合并失败，已放弃本次同步，请手动 Sync fork"
+              git merge --abort 2>/dev/null || true
+              exit 0
+            fi
+          fi
+
+          echo "合并后最近提交："
+          git log --oneline -5
+
+          if ! git push origin HEAD:main; then
+            echo "::warning::push 失败，等待下次运行"
+            exit 1
+          fi
+
+          echo "同步完成"
